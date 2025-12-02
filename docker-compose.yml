@@ -12,11 +12,9 @@ services:
       - MONGODB_URI=${MONGODB_URI}
       - PORT=3000
       - JWT_SECRET=devsecret
-      - STORAGE_PROVIDER=azure
-      - CLOUDINARY_URL=
-      - AZURE_STORAGE_CONNECTION_STRING=${AZURE_STORAGE_CONNECTION_STRING}
-      - AZURE_STORAGE_CONTAINER=${AZURE_STORAGE_CONTAINER}
-      - AZURE_STORAGE_ACCOUNT_NAME=${AZURE_STORAGE_ACCOUNT_NAME}
+      # Use local file storage for development (backend will store uploads on the host)
+      - STORAGE_PROVIDER=local
+      - LOCAL_UPLOADS_DIR=/data/uploads
       # MinIO removed - use Azure storage settings instead
 
   frontend:
@@ -29,6 +27,9 @@ services:
       - "8081:80"
     environment:
       - API_URL=http://localhost:3000
+
+    volumes:
+      - frontend-dist:/usr/share/nginx/html:ro
 
   # minio service removed; Azure Storage is used instead
 
@@ -66,4 +67,10 @@ services:
     depends_on:
       - prometheus
 
-volumes: {}
+volumes:
+  uploads:
+    driver: local
+  mongo-data:
+    driver: local
+  frontend-dist:
+    driver: local
