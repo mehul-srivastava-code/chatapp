@@ -12,12 +12,12 @@ pipeline {
 
   environment {
     // These environment vars are defaults; prefer parameters when triggering pipeline.
-    BACKEND_IMAGE = '${params.BACKEND_IMAGE}'
-    FRONTEND_IMAGE = '${params.FRONTEND_IMAGE}'
-    REGISTRY_MODE = '${params.REGISTRY_MODE}'
-    REGISTRY_URL = '${params.REGISTRY_URL}'
-    KIND_CLUSTER_NAME = '${params.KIND_CLUSTER_NAME}'
-    K8S_MANIFEST_DIR = '${params.K8S_MANIFEST_DIR}'
+    BACKEND_IMAGE = "${params.BACKEND_IMAGE}"
+    FRONTEND_IMAGE = "${params.FRONTEND_IMAGE}"
+    REGISTRY_MODE = "${params.REGISTRY_MODE}"
+    REGISTRY_URL = "${params.REGISTRY_URL}"
+    KIND_CLUSTER_NAME = "${params.KIND_CLUSTER_NAME}"
+    K8S_MANIFEST_DIR = "${params.K8S_MANIFEST_DIR}"
   }
 
   options {

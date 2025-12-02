@@ -19,8 +19,8 @@ services:
 
   frontend:
     build:
-      context: .
-      dockerfile: frontend/Dockerfile
+      context: ./frontend
+      dockerfile: Dockerfile
     depends_on:
       - backend
     ports:
@@ -28,8 +28,6 @@ services:
     environment:
       - API_URL=http://localhost:3000
 
-    volumes:
-      - frontend-dist:/usr/share/nginx/html:ro
 
   # minio service removed; Azure Storage is used instead
 
@@ -71,6 +69,4 @@ volumes:
   uploads:
     driver: local
   mongo-data:
-    driver: local
-  frontend-dist:
     driver: local
