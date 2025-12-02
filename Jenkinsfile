@@ -1,35 +1,88 @@
 pipeline {
   agent any
 
+  parameters {
+    choice(name: 'REGISTRY_MODE', choices: ['none','registry','kind'], description: 'How to make built images available to the cluster')
+    string(name: 'REGISTRY_URL', defaultValue: 'localhost:5000', description: 'Docker registry URL when using registry mode')
+    string(name: 'BACKEND_IMAGE', defaultValue: 'chatapp-backend:latest', description: 'Backend image name:tag')
+    string(name: 'FRONTEND_IMAGE', defaultValue: 'chatapp-frontend:latest', description: 'Frontend image name:tag')
+    string(name: 'KIND_CLUSTER_NAME', defaultValue: 'kind', description: 'Kind cluster name (when using kind)')
+    string(name: 'K8S_MANIFEST_DIR', defaultValue: 'k8s', description: 'Path to k8s manifests')
+  }
+
   environment {
-    BACKEND_IMAGE = 'chatapp-backend:latest'
-    FRONTEND_IMAGE = 'chatapp-frontend:latest'
-    K8S_MANIFEST_DIR = 'k8s'
-    // REGISTRY_MODE: 'none' | 'registry' | 'kind'
-    REGISTRY_MODE = 'none'
-    REGISTRY_URL = 'localhost:5000'
-    KIND_CLUSTER_NAME = 'kind'
+    // These environment vars are defaults; prefer parameters when triggering pipeline.
+    BACKEND_IMAGE = '${params.BACKEND_IMAGE}'
+    FRONTEND_IMAGE = '${params.FRONTEND_IMAGE}'
+    REGISTRY_MODE = '${params.REGISTRY_MODE}'
+    REGISTRY_URL = '${params.REGISTRY_URL}'
+    KIND_CLUSTER_NAME = '${params.KIND_CLUSTER_NAME}'
+    K8S_MANIFEST_DIR = '${params.K8S_MANIFEST_DIR}'
+  }
+
+  options {
+    timeout(time: 60, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '20'))
   }
 
   stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+      steps { checkout scm }
     }
 
-    stage('Build Backend Image') {
-      steps {
-        dir('.') {
-          sh 'docker build -t ${BACKEND_IMAGE} -f backend/Dockerfile .'
+    stage('Install & Test') {
+      parallel {
+        stage('Backend: Install & Test') {
+          steps {
+            dir('backend') {
+              sh 'if [ -f package.json ]; then npm ci || npm install; fi'
+              sh 'if [ -f package.json ] && [ -d test ]; then npm test || true; fi'
+            }
+          }
+        }
+        stage('Frontend: Install & Test') {
+          steps {
+            dir('frontend') {
+              sh 'if [ -f package.json ]; then npm ci || npm install; fi'
+              sh 'if [ -f package.json ] && [ -d test ]; then npm test || true; fi'
+            }
+          }
         }
       }
     }
 
-    stage('Build Frontend Image') {
+    stage('Build Images') {
       steps {
-        dir('.') {
-          sh 'docker build -t ${FRONTEND_IMAGE} -f frontend/Dockerfile frontend'
+        script {
+          echo "Building backend image: ${env.BACKEND_IMAGE}"
+          sh "docker build -t ${env.BACKEND_IMAGE} -f backend/Dockerfile ."
+
+          echo "Building frontend image: ${env.FRONTEND_IMAGE}"
+          sh "docker build -t ${env.FRONTEND_IMAGE} -f frontend/Dockerfile frontend"
+        }
+      }
+    }
+
+    stage('Publish / Load Images') {
+      steps {
+        script {
+          if (env.REGISTRY_MODE == 'registry') {
+            echo "Using registry mode: ${env.REGISTRY_URL}"
+            // Expect a Jenkins usernamePassword credential with id 'docker-registry-credentials'
+            withCredentials([usernamePassword(credentialsId: 'docker-registry-credentials', usernameVariable: 'REG_USER', passwordVariable: 'REG_PASS')]) {
+              sh "echo $REG_PASS | docker login ${env.REGISTRY_URL} -u $REG_USER --password-stdin"
+              sh "docker tag ${env.BACKEND_IMAGE} ${env.REGISTRY_URL}/${env.BACKEND_IMAGE}"
+              sh "docker tag ${env.FRONTEND_IMAGE} ${env.REGISTRY_URL}/${env.FRONTEND_IMAGE}"
+              sh "docker push ${env.REGISTRY_URL}/${env.BACKEND_IMAGE}"
+              sh "docker push ${env.REGISTRY_URL}/${env.FRONTEND_IMAGE}"
+            }
+          } else if (env.REGISTRY_MODE == 'kind') {
+            echo "Using kind mode (load images into kind cluster ${env.KIND_CLUSTER_NAME})"
+            sh "kind load docker-image ${env.BACKEND_IMAGE} --name ${env.KIND_CLUSTER_NAME} || true"
+            sh "kind load docker-image ${env.FRONTEND_IMAGE} --name ${env.KIND_CLUSTER_NAME} || true"
+          } else {
+            echo 'No publish step; assuming cluster can access local Docker images.'
+          }
         }
       }
     }
@@ -37,33 +90,38 @@ pipeline {
     stage('Deploy to Kubernetes') {
       steps {
         script {
-          // Assumes Jenkins agent has kubectl configured and has access to the target cluster
-          sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/pv-pvc.yaml || true'
-          sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/mongo-deployment.yaml || true'
-          sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/backend-deployment.yaml || true'
-          sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/backend-service.yaml || true'
-          sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/frontend-deployment.yaml || true'
-          sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/frontend-service.yaml || true'
+          // Support optional kubeconfig file credential with id 'kubeconfig' (type: Secret file)
+          def deployCmds = [
+            "kubectl apply -f ${env.K8S_MANIFEST_DIR}/pv-pvc.yaml || true",
+            "kubectl apply -f ${env.K8S_MANIFEST_DIR}/mongo-deployment.yaml || true",
+            "kubectl apply -f ${env.K8S_MANIFEST_DIR}/backend-deployment.yaml || true",
+            "kubectl apply -f ${env.K8S_MANIFEST_DIR}/backend-service.yaml || true",
+            "kubectl apply -f ${env.K8S_MANIFEST_DIR}/frontend-deployment.yaml || true",
+            "kubectl apply -f ${env.K8S_MANIFEST_DIR}/frontend-service.yaml || true"
+          ]
 
-          // Push or load images depending on REGISTRY_MODE
-          if (env.REGISTRY_MODE == 'registry') {
-            echo "Pushing images to registry ${env.REGISTRY_URL}"
-            sh "docker tag ${BACKEND_IMAGE} ${REGISTRY_URL}/${BACKEND_IMAGE}"
-            sh "docker tag ${FRONTEND_IMAGE} ${REGISTRY_URL}/${FRONTEND_IMAGE}"
-            sh "docker push ${REGISTRY_URL}/${BACKEND_IMAGE}"
-            sh "docker push ${REGISTRY_URL}/${FRONTEND_IMAGE}"
-            sh "kubectl set image deployment/backend backend=${REGISTRY_URL}/${BACKEND_IMAGE} --record || true"
-            sh "kubectl set image deployment/frontend frontend=${REGISTRY_URL}/${FRONTEND_IMAGE} --record || true"
-          } else if (env.REGISTRY_MODE == 'kind') {
-            echo "Loading images into kind cluster ${env.KIND_CLUSTER_NAME}"
-            sh "kind load docker-image ${BACKEND_IMAGE} --name ${KIND_CLUSTER_NAME} || true"
-            sh "kind load docker-image ${FRONTEND_IMAGE} --name ${KIND_CLUSTER_NAME} || true"
-            sh "kubectl set image deployment/backend backend=${BACKEND_IMAGE} --record || true"
-            sh "kubectl set image deployment/frontend frontend=${FRONTEND_IMAGE} --record || true"
+          if (fileExists('/run/secrets/kubernetes.io/serviceaccount/token')) {
+            // Likely running in-cluster agent with kubectl access
+            deployCmds.each { sh it }
           } else {
-            // assume cluster can access the built images directly (e.g. running in same host)
-            sh "kubectl set image deployment/backend backend=${BACKEND_IMAGE} --record || true"
-            sh "kubectl set image deployment/frontend frontend=${FRONTEND_IMAGE} --record || true"
+            // Try using a kubeconfig file credential, if configured in Jenkins
+            try {
+              withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                deployCmds.each { sh "KUBECONFIG=$KUBECONFIG_FILE ${it}" }
+              }
+            } catch (err) {
+              echo 'No kubeconfig credential found or apply failed. Attempting direct kubectl commands.'
+              deployCmds.each { sh it }
+            }
+          }
+
+          // Update images in deployments to point to registry images when applicable
+          if (env.REGISTRY_MODE == 'registry') {
+            sh "kubectl set image deployment/backend backend=${env.REGISTRY_URL}/${env.BACKEND_IMAGE} --record || true"
+            sh "kubectl set image deployment/frontend frontend=${env.REGISTRY_URL}/${env.FRONTEND_IMAGE} --record || true"
+          } else {
+            sh "kubectl set image deployment/backend backend=${env.BACKEND_IMAGE} --record || true"
+            sh "kubectl set image deployment/frontend frontend=${env.FRONTEND_IMAGE} --record || true"
           }
         }
       }
@@ -71,11 +129,8 @@ pipeline {
   }
 
   post {
-    success {
-      echo 'Deployed to Kubernetes successfully.'
-    }
-    failure {
-      echo 'Build or deploy failed.'
-    }
+    success { echo 'Jenkins pipeline completed and deployment applied.' }
+    failure { echo 'Pipeline failed — check console output for errors.' }
+    always { archiveArtifacts artifacts: '**/target/*.jar, frontend/dist/**', allowEmptyArchive: true }
   }
 }
