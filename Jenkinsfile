@@ -5,6 +5,10 @@ pipeline {
     BACKEND_IMAGE = 'chatapp-backend:latest'
     FRONTEND_IMAGE = 'chatapp-frontend:latest'
     K8S_MANIFEST_DIR = 'k8s'
+    // REGISTRY_MODE: 'none' | 'registry' | 'kind'
+    REGISTRY_MODE = 'none'
+    REGISTRY_URL = 'localhost:5000'
+    KIND_CLUSTER_NAME = 'kind'
   }
 
   stages {
@@ -41,9 +45,26 @@ pipeline {
           sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/frontend-deployment.yaml || true'
           sh 'kubectl apply -f ${K8S_MANIFEST_DIR}/frontend-service.yaml || true'
 
-          // Update deployments with the newly built images
-          sh 'kubectl set image deployment/backend backend=${BACKEND_IMAGE} --record || true'
-          sh 'kubectl set image deployment/frontend frontend=${FRONTEND_IMAGE} --record || true'
+          // Push or load images depending on REGISTRY_MODE
+          if (env.REGISTRY_MODE == 'registry') {
+            echo "Pushing images to registry ${env.REGISTRY_URL}"
+            sh "docker tag ${BACKEND_IMAGE} ${REGISTRY_URL}/${BACKEND_IMAGE}"
+            sh "docker tag ${FRONTEND_IMAGE} ${REGISTRY_URL}/${FRONTEND_IMAGE}"
+            sh "docker push ${REGISTRY_URL}/${BACKEND_IMAGE}"
+            sh "docker push ${REGISTRY_URL}/${FRONTEND_IMAGE}"
+            sh "kubectl set image deployment/backend backend=${REGISTRY_URL}/${BACKEND_IMAGE} --record || true"
+            sh "kubectl set image deployment/frontend frontend=${REGISTRY_URL}/${FRONTEND_IMAGE} --record || true"
+          } else if (env.REGISTRY_MODE == 'kind') {
+            echo "Loading images into kind cluster ${env.KIND_CLUSTER_NAME}"
+            sh "kind load docker-image ${BACKEND_IMAGE} --name ${KIND_CLUSTER_NAME} || true"
+            sh "kind load docker-image ${FRONTEND_IMAGE} --name ${KIND_CLUSTER_NAME} || true"
+            sh "kubectl set image deployment/backend backend=${BACKEND_IMAGE} --record || true"
+            sh "kubectl set image deployment/frontend frontend=${FRONTEND_IMAGE} --record || true"
+          } else {
+            // assume cluster can access the built images directly (e.g. running in same host)
+            sh "kubectl set image deployment/backend backend=${BACKEND_IMAGE} --record || true"
+            sh "kubectl set image deployment/frontend frontend=${FRONTEND_IMAGE} --record || true"
+          }
         }
       }
     }
